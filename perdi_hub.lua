@@ -1,12 +1,11 @@
 --[[
-    perdi | Fish, Train, Playtime Hop & Cloudphone Saver Hub (Rayfield UI)
+    perdi | Fish & Training Automation Hub (Rayfield UI)
     Features:
-      - Auto Fish + Stop at Tier (1..10 / SEA KING) [Zero-Allocation Cached Engine]
-      - Auto Perfect (Middle Bar) + Auto Perfect Reel (+25 Vertical Bar) [FPS-Independent]
+      - Auto Fish + Stop at Tier (1..10 / SEA KING)
+      - Auto Perfect (Middle Bar) + Auto Perfect Reel (+25 Vertical Bar)
       - Auto Train (Auto-learns plot bar offset & walks character into training circle on any server)
       - Auto 2x + Auto Upgrade
       - Auto Claim Playtime Rewards + Auto Server Hop once all 9 Playtime rewards are claimed
-      - Cloudphone Saver: Potato Graphics, Hide Other Players/Plot Beasts, No-3D AFK Mode, 25 FPS Cap
       - Auto Save & Auto Load across Server Hops (JSON config + queue_on_teleport)
       - Dual-Layer Anti-AFK
 ]]
@@ -28,10 +27,8 @@ local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local GuiService = game:GetService("GuiService")
 local CoreGui = game:GetService("CoreGui")
-local Lighting = game:GetService("Lighting")
 local HttpService = game:GetService("HttpService")
 local TeleportService = game:GetService("TeleportService")
-local ProximityPromptService = game:GetService("ProximityPromptService")
 local Workspace = game:GetService("Workspace")
 
 local VirtualInputManager = nil
@@ -70,13 +67,7 @@ local Config = {
 
     AutoPlaytime = false,
     ServerHopAfterPlaytime = false,
-    ScriptURL = "https://pastebin.com/raw/AAbZU6nm",
-
-    -- Cloudphone / Low-Spec Optimization Settings
-    PotatoMode = false,
-    HideOthers = false,
-    Disable3DRender = false,
-    CapFps25 = false,
+    ScriptURL = "https://raw.githubusercontent.com/triskxd-ops/Perdi/main/perdi_hub.lua",
 
     -- Plot-relative offset from your plot's Upgrade bar prompt to the training circle center
     BarOffsetX = nil,
@@ -126,8 +117,10 @@ local function loadPersistentConfig()
     end)
 end
 
+-- Load saved config immediately before building UI
 loadPersistentConfig()
 
+-- Capture PERDI_URL automatically if user launched with getgenv().PERDI_URL
 if type(globalEnv.PERDI_URL) == "string" and #globalEnv.PERDI_URL > 8 then
     Config.ScriptURL = globalEnv.PERDI_URL
     savePersistentConfig()
@@ -173,7 +166,7 @@ end
 end
 
 --============================================================================
--- ZERO-ALLOCATION RUNTIME STATE & EVENT CACHES
+-- RUNTIME STATE
 --============================================================================
 local State = {
     Running = true,
@@ -191,31 +184,17 @@ local State = {
     TrainProbeIndex = 0,
     LastPlaytimeScanAt = 0,
     LastFullPlaytimeVerifyAt = 0,
-    LastHideSweepAt = 0,
     HoppingInProgress = false,
     PlaytimeStatus = "Waiting...",
     LastShownPlaytimeStatus = "",
     LastAntiAfkPulseAt = os.clock(),
     PendingTapRelease = false,
-    OwnedPlotPos = nil,
-    LastPlotCheckAt = 0,
-
-    -- Strong flat numeric maps cleared when bar closes (Luau weak tables drop Instance keys!)
-    PrevMiddleX = {},
-    PrevMiddleY = {},
-    PrevReelX = {},
-    PrevReelY = {},
+    PrevMiddlePos = {},
+    PrevReelPos = {},
 }
 
 local Connections = {}
 local OriginalIdleConnections = nil
-
--- Strong live registries cleaned via DescendantRemoving (never use __mode="k" for Instances in Luau!)
-local ShownPrompts = {}       -- [ProximityPrompt currently on screen] = true
-local ActivePrompts = {}      -- [ProximityPrompt in Workspace] = true
-local PlotSignLabels = {}     -- [TextLabel in Workspace] = true
-local GuiTextPool = {}        -- [TextLabel / TextButton in PlayerGui] = true
-local GuiButtonPool = {}      -- [GuiButton in PlayerGui] = true
 
 --============================================================================
 -- LOAD RAYFIELD UI
@@ -285,7 +264,7 @@ local function isRayfieldInstance(inst)
     while cur and cur ~= game do
         if cur:IsA("LayerCollector") then
             local nl = cur.Name:lower()
-            if nl:find("rayfield", 1, true) or nl:find("sirius", 1, true) or nl == "perdiafkoverlay" then
+            if nl:find("rayfield", 1, true) or nl:find("sirius", 1, true) then
                 return true
             end
         end
@@ -294,16 +273,7 @@ local function isRayfieldInstance(inst)
     return false
 end
 
-local CachedRayfieldGuis = {}
-local LastRayfieldGuiCheckAt = 0
-
 local function getRayfieldScreenGuis()
-    local now = os.clock()
-    if (now - LastRayfieldGuiCheckAt) < 1.5 and #CachedRayfieldGuis > 0 then
-        return CachedRayfieldGuis
-    end
-    LastRayfieldGuiCheckAt = now
-
     local roots = {}
     if typeof(gethui) == "function" then
         local ok, hui = pcall(gethui)
@@ -329,7 +299,6 @@ local function getRayfieldScreenGuis()
             end
         end)
     end
-    CachedRayfieldGuis = list
     return list
 end
 
@@ -354,16 +323,7 @@ local function isPointCoveredByRayfield(vpX, vpY)
     return false
 end
 
-local LastPurchaseCheckAt = 0
-local LastPurchaseState = false
-
 local function isPurchasePromptOpen()
-    local now = os.clock()
-    if (now - LastPurchaseCheckAt) < 0.5 then
-        return LastPurchaseState
-    end
-    LastPurchaseCheckAt = now
-
     local ok, open = pcall(function()
         local pp = CoreGui:FindFirstChild("PurchasePrompt") or CoreGui:FindFirstChild("PurchasePromptApp")
         if not pp then
@@ -376,8 +336,7 @@ local function isPurchasePromptOpen()
         end
         return false
     end)
-    LastPurchaseState = (ok and open) or false
-    return LastPurchaseState
+    return ok and open or false
 end
 
 local function isGuiChainVisible(guiObj)
@@ -398,7 +357,7 @@ local function isGuiChainVisible(guiObj)
                 return false
             end
             local nl = current.Name:lower()
-            if nl:find("rayfield", 1, true) or nl:find("sirius", 1, true) or nl == "perdiafkoverlay" then
+            if nl:find("rayfield", 1, true) or nl:find("sirius", 1, true) then
                 return false
             end
             break
@@ -455,368 +414,6 @@ local function isSafeGameplayElement(guiObj)
         end
     end
     return true
-end
-
---============================================================================
--- CLOUDPHONE GRAPHICS & MEMORY OPTIMIZER
---============================================================================
-local AfkOverlayGui = nil
-local AfkToggleCallbackRef = nil
-
-local function stripLagFromInstance(obj)
-    if not obj or not obj.Parent then
-        return
-    end
-    if obj:IsA("BasePart") then
-        pcall(function()
-            obj.CastShadow = false
-            obj.Reflectance = 0
-            if not obj:IsA("Terrain") then
-                obj.Material = Enum.Material.SmoothPlastic
-            end
-        end)
-    elseif obj:IsA("ParticleEmitter") or obj:IsA("Trail") or obj:IsA("Beam")
-        or obj:IsA("Sparkles") or obj:IsA("Fire") or obj:IsA("Smoke")
-        or obj:IsA("Highlight") or obj:IsA("PointLight")
-        or obj:IsA("SpotLight") or obj:IsA("SurfaceLight")
-    then
-        pcall(function()
-            obj.Enabled = false
-        end)
-    elseif (obj:IsA("Decal") or obj:IsA("Texture")) and obj:IsDescendantOf(Workspace) then
-        -- Keep plot sign SurfaceGuis intact (TextLabels); only hide heavy 3D part textures/decals
-        local char = LocalPlayer.Character
-        if not char or not obj:IsDescendantOf(char) then
-            pcall(function()
-                obj.Transparency = 1
-            end)
-        end
-    elseif obj:IsA("PostEffect") or obj:IsA("Atmosphere") or obj:IsA("Clouds") then
-        pcall(function()
-            if obj:IsA("PostEffect") then
-                obj.Enabled = false
-            elseif obj:IsA("Clouds") then
-                obj.Enabled = false
-            elseif obj:IsA("Atmosphere") then
-                obj.Density = 0
-            end
-        end)
-    end
-end
-
-local PotatoSweepRunning = false
-local function applyPotatoGraphics(enabled)
-    if not enabled then
-        return
-    end
-
-    pcall(function()
-        settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
-    end)
-
-    pcall(function()
-        Lighting.GlobalShadows = false
-        Lighting.FogEnd = 9e9
-        Lighting.Brightness = 1
-        for _, child in ipairs(Lighting:GetChildren()) do
-            stripLagFromInstance(child)
-        end
-    end)
-
-    pcall(function()
-        local terrain = Workspace:FindFirstChildOfClass("Terrain")
-        if terrain then
-            terrain.WaterWaveSize = 0
-            terrain.WaterWaveSpeed = 0
-            terrain.WaterReflectance = 0
-            terrain.WaterTransparency = 0
-            pcall(function()
-                terrain.Decoration = false
-            end)
-        end
-    end)
-
-    if PotatoSweepRunning then
-        return
-    end
-    PotatoSweepRunning = true
-
-    -- Yielded batch sweep so enabling Potato Mode never stalls a Cloudphone!
-    task.spawn(function()
-        local children = Workspace:GetDescendants()
-        for i, inst in ipairs(children) do
-            if not State.Running or not Config.PotatoMode then
-                break
-            end
-            stripLagFromInstance(inst)
-            if i % 350 == 0 then
-                task.wait()
-            end
-        end
-        PotatoSweepRunning = false
-    end)
-end
-
-local function hideCharacterVisuals(char)
-    if not char then
-        return
-    end
-    for _, d in ipairs(char:GetDescendants()) do
-        if d:IsA("BasePart") then
-            pcall(function()
-                d.LocalTransparencyModifier = 1
-                d.CastShadow = false
-            end)
-        elseif d:IsA("Decal") or d:IsA("Texture") then
-            pcall(function()
-                d.Transparency = 1
-            end)
-        elseif d:IsA("ParticleEmitter") or d:IsA("Beam") or d:IsA("Trail") or d:IsA("Highlight") then
-            pcall(function()
-                d.Enabled = false
-            end)
-        end
-    end
-end
-
-local function restoreCharacterVisuals(char)
-    if not char then
-        return
-    end
-    for _, d in ipairs(char:GetDescendants()) do
-        if d:IsA("BasePart") and d.Name ~= "HumanoidRootPart" then
-            pcall(function()
-                d.LocalTransparencyModifier = 0
-            end)
-        end
-    end
-end
-
-local function sweepHideOthersAndPlotBeasts()
-    if not Config.HideOthers then
-        return
-    end
-
-    -- 1) Hide all other players' avatars
-    for _, plr in ipairs(Players:GetPlayers()) do
-        if plr ~= LocalPlayer and plr.Character then
-            hideCharacterVisuals(plr.Character)
-        end
-    end
-
-    -- 2) Hide giant animated Sea Beasts / Pets on OTHER players' plots (never touches floors or Abyss Holes)
-    local myPlot = State.OwnedPlotPos
-    for _, topChild in ipairs(Workspace:GetChildren()) do
-        local nl = topChild.Name:lower()
-        if nl:find("plot", 1, true) or nl:find("base", 1, true) or nl:find("aquarium", 1, true)
-            or nl:find("pen", 1, true) or nl:find("animal", 1, true) or nl:find("pet", 1, true)
-        then
-            for _, sub in ipairs(topChild:GetDescendants()) do
-                if sub:IsA("AnimationController") or (sub:IsA("Humanoid") and sub.Parent ~= LocalPlayer.Character) then
-                    local mdl = sub.Parent
-                    if mdl and mdl:IsA("Model") then
-                        local ok, piv = pcall(function()
-                            return mdl:GetPivot()
-                        end)
-                        local isFarFromMyPlot = true
-                        if ok and piv and myPlot and (piv.Position - myPlot).Magnitude < 75 then
-                            isFarFromMyPlot = false
-                        end
-                        if isFarFromMyPlot then
-                            hideCharacterVisuals(mdl)
-                        end
-                    end
-                end
-            end
-        end
-    end
-end
-
-local function applyFpsCapState(enabled)
-    local capFn = (typeof(setfpscap) == "function" and setfpscap)
-        or (typeof(set_fps_cap) == "function" and set_fps_cap)
-    if capFn then
-        pcall(function()
-            capFn(enabled and 25 or 60)
-        end)
-    end
-end
-
-local function ensureAfkOverlayGui()
-    if AfkOverlayGui and AfkOverlayGui.Parent then
-        return AfkOverlayGui
-    end
-
-    local sg = Instance.new("ScreenGui")
-    sg.Name = "perdiAfkOverlay"
-    sg.IgnoreGuiInset = true
-    sg.DisplayOrder = 10
-    sg.ResetOnSpawn = false
-
-    local parentTarget = PlayerGui
-    if typeof(gethui) == "function" then
-        local ok, hui = pcall(gethui)
-        if ok and hui then
-            parentTarget = hui
-        end
-    else
-        pcall(function()
-            parentTarget = CoreGui
-        end)
-    end
-    sg.Parent = parentTarget
-
-    -- IMPORTANT: Never place a fullscreen Frame in CoreGui/gethui, or it blocks PlayerGui touches!
-    -- Only show a compact corner button so gameplay bars & taps work 100% unobstructed.
-    local restoreBtn = Instance.new("TextButton")
-    restoreBtn.Name = "Restore3DBtn"
-    restoreBtn.Size = UDim2.new(0, 175, 0, 30)
-    restoreBtn.Position = UDim2.new(0, 14, 0, 62)
-    restoreBtn.BackgroundColor3 = Color3.fromRGB(24, 30, 38)
-    restoreBtn.BorderSizePixel = 0
-    restoreBtn.Font = Enum.Font.GothamSemibold
-    restoreBtn.TextSize = 12
-    restoreBtn.TextColor3 = Color3.fromRGB(160, 235, 185)
-    restoreBtn.Text = "No-3D ON (Tap to Restore)"
-    restoreBtn.Parent = sg
-
-    local corner = Instance.new("UICorner")
-    corner.CornerRadius = UDim.new(0, 8)
-    corner.Parent = restoreBtn
-
-    restoreBtn.Activated:Connect(function()
-        Config.Disable3DRender = false
-        savePersistentConfig()
-        pcall(function()
-            RunService:Set3dRenderingEnabled(true)
-        end)
-        sg.Enabled = false
-        if AfkToggleCallbackRef then
-            pcall(function()
-                AfkToggleCallbackRef:Set(false)
-            end)
-        end
-    end)
-
-    AfkOverlayGui = sg
-    return sg
-end
-
-local function applyNo3DRenderState(enabled)
-    local sg = ensureAfkOverlayGui()
-    sg.Enabled = enabled and true or false
-    pcall(function()
-        RunService:Set3dRenderingEnabled(not enabled)
-    end)
-end
-
---============================================================================
--- LIVE EVENT REGISTRIES (Eliminates GetDescendants Lag Spikes!)
---============================================================================
-local function registerWorkspaceInstance(inst)
-    if not inst then
-        return
-    end
-    if inst:IsA("ProximityPrompt") then
-        ActivePrompts[inst] = true
-    elseif inst:IsA("TextLabel") then
-        local up = stripRichText(inst.Text or ""):upper()
-        if up == "YOURS" or inst.Parent and (inst.Parent:IsA("BillboardGui") or inst.Parent:IsA("SurfaceGui")) then
-            PlotSignLabels[inst] = true
-        end
-    end
-    if Config.PotatoMode then
-        stripLagFromInstance(inst)
-    end
-end
-
-local function registerPlayerGuiInstance(inst)
-    if not inst or isRayfieldInstance(inst) then
-        return
-    end
-    if inst:IsA("TextLabel") or inst:IsA("TextButton") then
-        GuiTextPool[inst] = true
-    end
-    if inst:IsA("GuiButton") then
-        GuiButtonPool[inst] = true
-    end
-end
-
-local function initializeCachesAsync()
-    -- Track currently visible ProximityPrompts directly from Roblox's ProximityPromptService!
-    pcall(function()
-        table.insert(Connections, ProximityPromptService.PromptShown:Connect(function(prompt)
-            if prompt then
-                ShownPrompts[prompt] = true
-                ActivePrompts[prompt] = true
-            end
-        end))
-        table.insert(Connections, ProximityPromptService.PromptHidden:Connect(function(prompt)
-            if prompt then
-                ShownPrompts[prompt] = nil
-            end
-        end))
-    end)
-
-    -- Register live listeners immediately so nothing is missed
-    table.insert(Connections, Workspace.DescendantAdded:Connect(registerWorkspaceInstance))
-    table.insert(Connections, Workspace.DescendantRemoving:Connect(function(inst)
-        ShownPrompts[inst] = nil
-        ActivePrompts[inst] = nil
-        PlotSignLabels[inst] = nil
-    end))
-
-    table.insert(Connections, PlayerGui.DescendantAdded:Connect(registerPlayerGuiInstance))
-    table.insert(Connections, PlayerGui.DescendantRemoving:Connect(function(inst)
-        GuiTextPool[inst] = nil
-        GuiButtonPool[inst] = nil
-    end))
-
-    -- Instant spatial scan around player so nearby Abyss Hole / Bar prompts work in 0.00s!
-    pcall(function()
-        local char = LocalPlayer.Character
-        local root = char and (char:FindFirstChild("HumanoidRootPart") or char.PrimaryPart)
-        if root then
-            for _, part in ipairs(Workspace:GetPartBoundsInRadius(root.Position, 28)) do
-                registerWorkspaceInstance(part)
-                for _, d in ipairs(part:GetDescendants()) do
-                    registerWorkspaceInstance(d)
-                end
-                if part.Parent then
-                    for _, sib in ipairs(part.Parent:GetChildren()) do
-                        if sib:IsA("ProximityPrompt") then
-                            ActivePrompts[sib] = true
-                        end
-                    end
-                end
-            end
-        end
-    end)
-
-    -- Yielded one-time bootstrap scan (zero frame spike on Cloudphones)
-    task.spawn(function()
-        for i, inst in ipairs(PlayerGui:GetDescendants()) do
-            if not State.Running then
-                return
-            end
-            registerPlayerGuiInstance(inst)
-            if i % 2000 == 0 then
-                task.wait()
-            end
-        end
-    end)
-
-    task.spawn(function()
-        for i, inst in ipairs(Workspace:GetDescendants()) do
-            if not State.Running then
-                return
-            end
-            registerWorkspaceInstance(inst)
-            if i % 1500 == 0 then
-                task.wait()
-            end
-        end
-    end)
 end
 
 --============================================================================
@@ -957,6 +554,7 @@ local function clickGuiElement(targetGui)
     end
 
     local btn = findClickableButton(targetGui)
+    -- Guard: never click the workout "STOP" button by mistake!
     if btn and btn:IsA("TextButton") and stripRichText(btn.Text or ""):upper() == "STOP" then
         return false
     end
@@ -966,31 +564,17 @@ local function clickGuiElement(targetGui)
     local vpX = clickTarget.AbsolutePosition.X + clickTarget.AbsoluteSize.X * 0.5 + inset.X
     local vpY = clickTarget.AbsolutePosition.Y + clickTarget.AbsoluteSize.Y * 0.5 + inset.Y
 
-    -- Prefer VirtualInputManager tap first when unobstructed (works on all Android Cloudphone UI buttons!)
     if not isPointCoveredByRayfield(vpX, vpY) then
         if sendScreenTap(vpX, vpY) then
             return true
         end
-    else
-        -- If "Show Rayfield" badge covers top-center of a button, try bottom edge of that button
-        local altY = clickTarget.AbsolutePosition.Y + clickTarget.AbsoluteSize.Y * 0.85 + inset.Y
-        if clickTarget.AbsoluteSize.Y >= 24 and not isPointCoveredByRayfield(vpX, altY) then
-            if sendScreenTap(vpX, altY) then
-                return true
-            end
-        end
     end
 
-    -- Fallback to signal firing if Rayfield window is covering the button
     if btn and fireSingleButtonSignal(btn) then
         return true
     end
     return false
 end
-
--- Pre-allocated candidate ratios so fireInstantMiddleTap allocates zero tables
-local TAP_RATIO_X = { 0.18, 0.82, 0.50, 0.18, 0.82 }
-local TAP_RATIO_Y = { 0.32, 0.32, 0.28, 0.60, 0.60 }
 
 local function fireInstantMiddleTap(minigameScreenGui, trackObj)
     if State.PendingTapRelease then
@@ -1036,13 +620,18 @@ local function fireInstantMiddleTap(minigameScreenGui, trackObj)
         end
     end
 
-    local vpX = math.floor(vs.X * TAP_RATIO_X[1])
-    local vpY = math.floor(vs.Y * TAP_RATIO_Y[1])
-    for i = 1, #TAP_RATIO_X do
-        local cx = vs.X * TAP_RATIO_X[i]
-        local cy = vs.Y * TAP_RATIO_Y[i]
-        if not isPointCoveredByRayfield(cx, cy) then
-            vpX, vpY = math.floor(cx), math.floor(cy)
+    local candidates = {
+        { vs.X * 0.18, vs.Y * 0.32 },
+        { vs.X * 0.82, vs.Y * 0.32 },
+        { vs.X * 0.50, vs.Y * 0.28 },
+        { vs.X * 0.18, vs.Y * 0.60 },
+        { vs.X * 0.82, vs.Y * 0.60 },
+    }
+
+    local vpX, vpY = candidates[1][1], candidates[1][2]
+    for _, pt in ipairs(candidates) do
+        if not isPointCoveredByRayfield(pt[1], pt[2]) then
+            vpX, vpY = math.floor(pt[1]), math.floor(pt[2])
             break
         end
     end
@@ -1093,7 +682,7 @@ local function fireInstantMiddleTap(minigameScreenGui, trackObj)
 end
 
 --============================================================================
--- CHARACTER & CACHED PROXIMITY PROMPT HELPERS (0 Workspace:GetDescendants!)
+-- CHARACTER & PROXIMITY PROMPT HELPERS
 --============================================================================
 local function getCharacterAndRoot()
     local char = LocalPlayer.Character
@@ -1142,20 +731,6 @@ local function getPromptWorldPosition(prompt)
 end
 
 local function findNearestPromptMatching(predicate, customMaxRadius)
-    -- 1) Instant check: prompts Roblox is actively showing on screen right now!
-    for prompt in pairs(ShownPrompts) do
-        if not prompt.Parent then
-            ShownPrompts[prompt] = nil
-        elseif prompt.Enabled then
-            local actionText = stripRichText(prompt.ActionText or ""):lower()
-            local objectText = stripRichText(prompt.ObjectText or ""):lower()
-            if predicate(actionText, objectText, prompt) then
-                return prompt
-            end
-        end
-    end
-
-    -- 2) Cached Workspace prompt registry check
     local _, root = getCharacterAndRoot()
     if not root then
         return nil
@@ -1164,17 +739,15 @@ local function findNearestPromptMatching(predicate, customMaxRadius)
     local bestPrompt = nil
     local bestDist = math.huge
 
-    for desc in pairs(ActivePrompts) do
-        if not desc.Parent then
-            ActivePrompts[desc] = nil
-        elseif desc.Enabled then
+    for _, desc in ipairs(Workspace:GetDescendants()) do
+        if desc:IsA("ProximityPrompt") and desc.Enabled then
             local actionText = stripRichText(desc.ActionText or ""):lower()
             local objectText = stripRichText(desc.ObjectText or ""):lower()
             if predicate(actionText, objectText, desc) then
                 local promptPos = getPromptWorldPosition(desc)
                 if promptPos then
                     local dist = (promptPos - rootPos).Magnitude
-                    local maxDist = customMaxRadius or ((desc.MaxActivationDistance or 10) + 4)
+                    local maxDist = customMaxRadius or ((desc.MaxActivationDistance or 10) + 3)
                     if dist <= maxDist and dist < bestDist then
                         bestDist = dist
                         bestPrompt = desc
@@ -1211,18 +784,11 @@ end
 --============================================================================
 -- AUTO TRAIN (Walks onto Your Plot's Training Circle & Auto-Learns Offset)
 --============================================================================
-local CachedStopBtn = nil
-
 local function isCurrentlyTraining()
-    if CachedStopBtn and CachedStopBtn.Parent and isVisibleTextElement(CachedStopBtn) then
-        if stripRichText(CachedStopBtn.Text or ""):upper() == "STOP" then
-            return true
-        end
-    end
-    for d in pairs(GuiTextPool) do
-        if d.Parent and isVisibleTextElement(d) then
+    -- While training on the bar, the red "STOP" button is visible at bottom-center
+    for _, d in ipairs(PlayerGui:GetDescendants()) do
+        if (d:IsA("TextLabel") or d:IsA("TextButton")) and isVisibleTextElement(d) then
             if stripRichText(d.Text or ""):upper() == "STOP" then
-                CachedStopBtn = d
                 return true
             end
         end
@@ -1231,27 +797,20 @@ local function isCurrentlyTraining()
 end
 
 local function findOwnedPlotAnchorPos()
-    local now = os.clock()
-    if State.OwnedPlotPos and (now - State.LastPlotCheckAt) < 15.0 then
-        return State.OwnedPlotPos
-    end
-    State.LastPlotCheckAt = now
-
-    for d in pairs(PlotSignLabels) do
-        if d.Parent and stripRichText(d.Text or ""):upper() == "YOURS" then
+    -- Look for the "YOURS" plot sign in Workspace (BillboardGui / SurfaceGui)
+    for _, d in ipairs(Workspace:GetDescendants()) do
+        if d:IsA("TextLabel") and stripRichText(d.Text or ""):upper() == "YOURS" then
             local gui = d:FindFirstAncestorWhichIsA("BillboardGui") or d:FindFirstAncestorWhichIsA("SurfaceGui")
             if gui and gui.Adornee and gui.Adornee:IsA("BasePart") then
-                State.OwnedPlotPos = gui.Adornee.Position
-                return State.OwnedPlotPos
+                return gui.Adornee.Position
             end
             local part = d:FindFirstAncestorWhichIsA("BasePart")
             if part then
-                State.OwnedPlotPos = part.Position
-                return State.OwnedPlotPos
+                return part.Position
             end
         end
     end
-    return State.OwnedPlotPos
+    return nil
 end
 
 local function findMyBarUpgradePrompt()
@@ -1265,8 +824,8 @@ local function findMyBarUpgradePrompt()
     local bestPrompt = nil
     local bestDist = math.huge
 
-    for desc in pairs(ActivePrompts) do
-        if desc.Parent and desc.Enabled then
+    for _, desc in ipairs(Workspace:GetDescendants()) do
+        if desc:IsA("ProximityPrompt") and desc.Enabled then
             local act = stripRichText(desc.ActionText or ""):lower()
             if act:find("upgrade", 1, true) ~= nil then
                 local pPos = getPromptWorldPosition(desc)
@@ -1283,8 +842,6 @@ local function findMyBarUpgradePrompt()
     return bestPrompt
 end
 
-local CachedTrainPadPart = nil
-
 local function findTrainingPadPosition(upgradePrompt)
     local _, root = getCharacterAndRoot()
     if not root or not upgradePrompt then
@@ -1297,7 +854,7 @@ local function findTrainingPadPosition(upgradePrompt)
         return nil
     end
 
-    -- 1) Use saved plot-relative offset if learned
+    -- 1) If we learned/saved the exact plot-relative offset from the Upgrade bar, map it to world space!
     if upgradePart and Config.BarOffsetX and Config.BarOffsetY and Config.BarOffsetZ then
         local localOffset = Vector3.new(Config.BarOffsetX, Config.BarOffsetY, Config.BarOffsetZ)
         if localOffset.Magnitude <= 35 then
@@ -1305,38 +862,44 @@ local function findTrainingPadPosition(upgradePrompt)
         end
     end
 
-    -- 2) Check cached pad part if already found near this plot
-    if CachedTrainPadPart and CachedTrainPadPart.Parent and (CachedTrainPadPart.Position - promptPos).Magnitude <= 30 then
-        return CachedTrainPadPart.Position
-    end
+    -- 2) Scan within 28 studs of your Upgrade prompt for the TouchTransmitter training circle/pad
+    local bestTouchPart = nil
+    local bestTouchDist = math.huge
+    local bestNamedPart = nil
+    local bestNamedDist = math.huge
 
-    -- 3) Local search only around the upgrade prompt's ancestor model/plot (not all Workspace!)
-    local localContainer = upgradePrompt:FindFirstAncestorOfClass("Model")
-    if localContainer and localContainer.Parent and localContainer.Parent ~= Workspace then
-        localContainer = localContainer.Parent
-    end
-
-    if localContainer then
-        local bestTouchPart = nil
-        local bestTouchDist = math.huge
-        for _, obj in ipairs(localContainer:GetDescendants()) do
-            if obj:IsA("BasePart") and math.abs(obj.Position.Y - root.Position.Y) <= 14 then
-                local dist = (obj.Position - promptPos).Magnitude
-                if dist <= 28 and obj:FindFirstChildOfClass(CLS_TOUCH) then
+    for _, obj in ipairs(Workspace:GetDescendants()) do
+        if obj:IsA("BasePart") and math.abs(obj.Position.Y - root.Position.Y) <= 14 then
+            local dist = (obj.Position - promptPos).Magnitude
+            if dist <= 28 then
+                if obj:FindFirstChildOfClass(CLS_TOUCH) then
                     if dist < bestTouchDist then
                         bestTouchDist = dist
                         bestTouchPart = obj
                     end
                 end
+                local nl = obj.Name:lower()
+                local parentNl = obj.Parent and obj.Parent.Name:lower() or ""
+                if nl:find("circle", 1, true) or nl:find("ring", 1, true) or nl:find("train", 1, true)
+                    or nl:find("pad", 1, true) or nl:find("zone", 1, true) or parentNl:find("bar", 1, true)
+                then
+                    if dist < bestNamedDist then
+                        bestNamedDist = dist
+                        bestNamedPart = obj
+                    end
+                end
             end
-        end
-        if bestTouchPart then
-            CachedTrainPadPart = bestTouchPart
-            return bestTouchPart.Position
         end
     end
 
-    -- 4) Fallback: probe around Upgrade prompt until "STOP" triggers, then auto-save!
+    if bestTouchPart then
+        return bestTouchPart.Position
+    end
+    if bestNamedPart then
+        return bestNamedPart.Position
+    end
+
+    -- 3) Fallback: probe right around the Upgrade prompt until "STOP" triggers, then auto-save!
     local probeOffsets = {
         Vector3.new(0, 0, 0),
         Vector3.new(5, 0, 0),
@@ -1358,6 +921,7 @@ local function stepAutoTrain()
     end
 
     if isCurrentlyTraining() then
+        -- Automatically learn & save the exact plot-relative training circle offset!
         if Config.BarOffsetX == nil then
             local upPrompt = findMyBarUpgradePrompt()
             local upPart = upPrompt and getPromptBasePart(upPrompt) or nil
@@ -1389,6 +953,7 @@ local function stepAutoTrain()
 
     local flatDist = Vector3.new(targetPos.X - root.Position.X, 0, targetPos.Z - root.Position.Z).Magnitude
     if flatDist > 90 then
+        -- Smoothly place character near plot bar if spawned far away, then walk into the circle
         root.CFrame = CFrame.new(targetPos + Vector3.new(0, 3.5, 4))
         task.wait(0.15)
     end
@@ -1497,6 +1062,7 @@ local function serverHopToFreshServer()
             end
         end
 
+        -- Fallback generic Teleport if server list API was rate-limited
         State.PlaytimeStatus = "Fallback teleporting to another server..."
         pcall(function()
             TeleportService:Teleport(game.PlaceId, LocalPlayer)
@@ -1507,8 +1073,9 @@ local function serverHopToFreshServer()
 end
 
 local function findRewardsHudOpenButton()
-    for d in pairs(GuiTextPool) do
-        if d.Parent and isVisibleTextElement(d) then
+    -- Look for the top HUD Gift button that shows "in MM:SS" (e.g., "in 8:28") or named Rewards/Playtime
+    for _, d in ipairs(PlayerGui:GetDescendants()) do
+        if (d:IsA("TextLabel") or d:IsA("TextButton")) and isVisibleTextElement(d) then
             local clean = stripRichText(d.Text or ""):lower()
             if clean:match("^in%s+%d+:%d+$") then
                 local btn = findClickableButton(d)
@@ -1521,8 +1088,8 @@ local function findRewardsHudOpenButton()
             end
         end
     end
-    for d in pairs(GuiButtonPool) do
-        if d.Parent and isGuiChainVisible(d) and d.AbsolutePosition.Y < 160 then
+    for _, d in ipairs(PlayerGui:GetDescendants()) do
+        if d:IsA("GuiButton") and isGuiChainVisible(d) and d.AbsolutePosition.Y < 160 then
             local nl = d.Name:lower()
             if nl:find("reward", 1, true) or nl:find("playtime", 1, true) or nl:find("gift", 1, true) then
                 return d
@@ -1533,8 +1100,9 @@ local function findRewardsHudOpenButton()
 end
 
 local function hasHiddenOrVisibleReadyPlaytime()
-    for d in pairs(GuiTextPool) do
-        if d.Parent then
+    -- Check if any Playtime slot in PlayerGui already says "READY!" or HUD Gift badge >= 1
+    for _, d in ipairs(PlayerGui:GetDescendants()) do
+        if d:IsA("TextLabel") or d:IsA("TextLabel") or d:IsA("TextButton") then
             local clean = stripRichText(d.Text or ""):upper()
             if clean == "READY!" then
                 return true
@@ -1556,11 +1124,12 @@ local function hasHiddenOrVisibleReadyPlaytime()
 end
 
 local function findOpenRewardsModal()
+    -- Find the visible "PLAYTIME" tab button inside the "Rewards" window
     local playtimeTabBtn = nil
     local rewardsTitle = nil
 
-    for d in pairs(GuiTextPool) do
-        if d.Parent and isVisibleTextElement(d) then
+    for _, d in ipairs(PlayerGui:GetDescendants()) do
+        if (d:IsA("TextLabel") or d:IsA("TextButton")) and isVisibleTextElement(d) then
             local up = stripRichText(d.Text or ""):upper()
             if up == "PLAYTIME" then
                 playtimeTabBtn = d
@@ -1574,6 +1143,7 @@ local function findOpenRewardsModal()
         return nil
     end
 
+    -- Walk up from PLAYTIME tab button to find the main Rewards modal Frame
     local modal = playtimeTabBtn.Parent
     while modal and modal.Parent and modal:IsA("GuiObject") do
         if modal.AbsoluteSize.X >= 260 and modal.AbsoluteSize.Y >= 220 then
@@ -1585,6 +1155,7 @@ local function findOpenRewardsModal()
         return nil
     end
 
+    -- Locate the red "X" close button inside the Rewards modal header
     local closeBtn = nil
     for _, d in ipairs(modal:GetDescendants()) do
         if (d:IsA("TextLabel") or d:IsA("TextButton")) and isVisibleTextElement(d) then
@@ -1646,22 +1217,24 @@ local function stepAutoPlaytimeAndHop()
     end
 
     local now = os.clock()
+    -- Wait 5s after joining a server so PlayerGui & rewards initialize
     if (now - State.JoinedAt) < 5.0 then
         return
     end
-    if (now - State.LastPlaytimeScanAt) < 5.5 then
+    if (now - State.LastPlaytimeScanAt) < 5.0 then
         return
     end
     State.LastPlaytimeScanAt = now
 
     local openInfo = findOpenRewardsModal()
     local hasReadySignal = hasHiddenOrVisibleReadyPlaytime()
-    local duePeriodicVerify = (now - State.LastFullPlaytimeVerifyAt) >= 45.0
+    local duePeriodicVerify = (now - State.LastFullPlaytimeVerifyAt) >= 40.0
 
     if not openInfo and not hasReadySignal and not duePeriodicVerify then
         return
     end
 
+    -- Open Rewards modal if it isn't open yet
     local openedByScript = false
     if not openInfo then
         local hudBtn = findRewardsHudOpenButton()
@@ -1679,6 +1252,7 @@ local function stepAutoPlaytimeAndHop()
 
     State.LastFullPlaytimeVerifyAt = now
 
+    -- Switch to PLAYTIME tab if subtitle isn't showing yet
     local grid = inspectPlaytimeGrid(openInfo.Modal)
     if not grid.SubtitleSeen and openInfo.PlaytimeTabBtn then
         clickGuiElement(openInfo.PlaytimeTabBtn)
@@ -1686,6 +1260,7 @@ local function stepAutoPlaytimeAndHop()
         grid = inspectPlaytimeGrid(openInfo.Modal)
     end
 
+    -- Claim all "READY!" slots
     if #grid.ReadyLabels > 0 then
         State.PlaytimeStatus = string.format("Claiming %d READY Playtime reward(s)...", #grid.ReadyLabels)
         for _, rLbl in ipairs(grid.ReadyLabels) do
@@ -1705,6 +1280,7 @@ local function stepAutoPlaytimeAndHop()
         grid.TimerCount
     )
 
+    -- Check if ALL 9 Playtime rewards have been claimed (0 READY + 0 MM:SS timers while grid is loaded)
     if grid.SubtitleSeen and grid.ItemSlotCount >= 4 and #grid.ReadyLabels == 0 and grid.TimerCount == 0 then
         task.wait(1.0)
         local confirmGrid = inspectPlaytimeGrid(openInfo.Modal)
@@ -1718,13 +1294,14 @@ local function stepAutoPlaytimeAndHop()
         end
     end
 
+    -- Close the Rewards modal cleanly if we opened it (so screen stays clear)
     if openedByScript and openInfo.CloseBtn then
         clickGuiElement(openInfo.CloseBtn)
     end
 end
 
 --============================================================================
--- FPS-INDEPENDENT ZERO-ALLOCATION AUTO MIDDLE (RenderStepped)
+-- RESOLUTION-INDEPENDENT MOTION-FIRST AUTO MIDDLE (RenderStepped)
 --============================================================================
 local CachedBar = {
     Header = nil,
@@ -1767,22 +1344,11 @@ local function findTrackForCursor(cursor, searchRoot, screenW)
     return bestTrack
 end
 
-local function stepAutoMiddle()
-    if not State.Running or not Config.AutoPerfect then
-        return
-    end
-
+local function getActiveMinigameData()
     local now = os.clock()
     local cam = Workspace.CurrentCamera
     local vs = cam and cam.ViewportSize or Vector2.new(1280, 720)
     local screenW, screenH = vs.X, vs.Y
-
-    local screenGui = nil
-    local trackObj = nil
-    local curX = nil
-    local dx = 0
-    local middleX = screenW * 0.5
-    local yellowHalfW = screenW * 0.018
 
     if CachedBar.Header and isVisibleTextElement(CachedBar.Header)
         and CachedBar.Cursor and isGuiChainVisible(CachedBar.Cursor)
@@ -1790,108 +1356,134 @@ local function stepAutoMiddle()
         local cursor = CachedBar.Cursor
         local cx = cursor.AbsolutePosition.X + cursor.AbsoluteSize.X * 0.5
         local cy = cursor.AbsolutePosition.Y + cursor.AbsoluteSize.Y * 0.5
-        local prevX = State.PrevMiddleX[cursor]
-        dx = prevX and (cx - prevX) or 0
-        State.PrevMiddleX[cursor] = cx
-        State.PrevMiddleY[cursor] = cy
+        local prev = State.PrevMiddlePos[cursor]
+        local vx = prev and (cx - prev.x) or 0
+        State.PrevMiddlePos[cursor] = { x = cx, y = cy }
 
         local track = (CachedBar.Track and isGuiChainVisible(CachedBar.Track)) and CachedBar.Track or nil
-        middleX = track and (track.AbsolutePosition.X + track.AbsoluteSize.X * 0.5) or (screenW * 0.5)
-        yellowHalfW = track and (track.AbsoluteSize.X * 0.042) or (screenW * 0.018)
-        screenGui = CachedBar.ScreenGui
-        trackObj = track
-        curX = cx
-    else
-        if not CachedBar.Header or not isVisibleTextElement(CachedBar.Header) then
-            if (now - CachedBar.LastIdleScanAt) < 0.10 then
-                return
-            end
-            CachedBar.LastIdleScanAt = now
-            CachedBar.Header = nil
-            CachedBar.Cursor = nil
-            CachedBar.Track = nil
-            table.clear(State.PrevMiddleX)
-            table.clear(State.PrevMiddleY)
+        local middleX = track and (track.AbsolutePosition.X + track.AbsoluteSize.X * 0.5) or (screenW * 0.5)
+        local yellowHalfW = track and (track.AbsoluteSize.X * 0.042) or (screenW * 0.018)
 
-            for _, desc in ipairs(PlayerGui:GetDescendants()) do
-                if (desc:IsA("TextLabel") or desc:IsA("TextButton")) and isVisibleTextElement(desc) then
-                    local upper = stripRichText(desc.Text or ""):upper()
-                    if upper:find("STRENGTHEN", 1, true) or upper:find("TAP THE MIDDLE", 1, true) then
-                        CachedBar.Header = desc
-                        CachedBar.ScreenGui = desc:FindFirstAncestorWhichIsA("LayerCollector") or desc.Parent
-                        break
-                    end
+        return {
+            ScreenGui = CachedBar.ScreenGui,
+            Track = track,
+            CurX = cx,
+            Vx = vx,
+            MiddleX = middleX,
+            YellowHalfWidth = yellowHalfW,
+        }
+    end
+
+    if not CachedBar.Header or not isVisibleTextElement(CachedBar.Header) then
+        if (now - CachedBar.LastIdleScanAt) < 0.08 then
+            return nil
+        end
+        CachedBar.LastIdleScanAt = now
+        CachedBar.Header = nil
+        CachedBar.Cursor = nil
+        CachedBar.Track = nil
+
+        for _, desc in ipairs(PlayerGui:GetDescendants()) do
+            if (desc:IsA("TextLabel") or desc:IsA("TextButton")) and isVisibleTextElement(desc) then
+                local upper = stripRichText(desc.Text or ""):upper()
+                if upper:find("STRENGTHEN", 1, true) or upper:find("TAP THE MIDDLE", 1, true) then
+                    CachedBar.Header = desc
+                    CachedBar.ScreenGui = desc:FindFirstAncestorWhichIsA("LayerCollector") or desc.Parent
+                    break
                 end
-            end
-
-            if not CachedBar.Header then
-                return
             end
         end
 
-        local searchRoot = CachedBar.ScreenGui or PlayerGui
-        local bestCursor = nil
-        local bestSpeed = 0
-        local bestDx = 0
+        if not CachedBar.Header then
+            return nil
+        end
+    end
 
-        for _, obj in ipairs(searchRoot:GetDescendants()) do
-            if obj:IsA("GuiObject") and not obj:IsA("TextLabel") and isGuiChainVisible(obj) then
-                local sx, sy = obj.AbsoluteSize.X, obj.AbsoluteSize.Y
-                if sx >= 2 and sx <= screenW * 0.12 and sy >= 8 and sy <= screenH * 0.35 and sx <= sy * 1.5 then
-                    local cx = obj.AbsolutePosition.X + sx * 0.5
-                    local cy = obj.AbsolutePosition.Y + sy * 0.5
-                    local px = State.PrevMiddleX[obj]
-                    local py = State.PrevMiddleY[obj]
-                    State.PrevMiddleX[obj] = cx
-                    State.PrevMiddleY[obj] = cy
+    local searchRoot = CachedBar.ScreenGui or PlayerGui
+    local bestCursor = nil
+    local bestSpeed = 0
+    local bestVx = 0
 
-                    if px and py then
-                        local stepDx = cx - px
-                        local stepDy = cy - py
-                        if math.abs(stepDx) > 0.3 and math.abs(stepDy) < 1.5 then
-                            if math.abs(stepDx) > bestSpeed then
-                                bestSpeed = math.abs(stepDx)
-                                bestDx = stepDx
-                                bestCursor = obj
-                            end
+    for _, obj in ipairs(searchRoot:GetDescendants()) do
+        if obj:IsA("GuiObject") and not obj:IsA("TextLabel") and isGuiChainVisible(obj) then
+            local sx, sy = obj.AbsoluteSize.X, obj.AbsoluteSize.Y
+            if sx >= 2 and sx <= screenW * 0.12 and sy >= 8 and sy <= screenH * 0.35 and sx <= sy * 1.5 then
+                local cx = obj.AbsolutePosition.X + sx * 0.5
+                local cy = obj.AbsolutePosition.Y + sy * 0.5
+                local prev = State.PrevMiddlePos[obj]
+                State.PrevMiddlePos[obj] = { x = cx, y = cy }
+
+                if prev then
+                    local dx = cx - prev.x
+                    local dy = cy - prev.y
+                    if math.abs(dx) > 0.3 and math.abs(dy) < 1.5 then
+                        if math.abs(dx) > bestSpeed then
+                            bestSpeed = math.abs(dx)
+                            bestVx = dx
+                            bestCursor = obj
                         end
                     end
                 end
             end
         end
-
-        if not bestCursor then
-            return
-        end
-
-        CachedBar.Cursor = bestCursor
-        CachedBar.Track = findTrackForCursor(bestCursor, searchRoot, screenW)
-        curX = bestCursor.AbsolutePosition.X + bestCursor.AbsoluteSize.X * 0.5
-        dx = bestDx
-        local track = CachedBar.Track
-        middleX = track and (track.AbsolutePosition.X + track.AbsoluteSize.X * 0.5) or (screenW * 0.5)
-        yellowHalfW = track and (track.AbsoluteSize.X * 0.042) or (screenW * 0.018)
-        screenGui = CachedBar.ScreenGui
-        trackObj = track
     end
 
+    if not bestCursor then
+        return {
+            ScreenGui = CachedBar.ScreenGui,
+            WaitingForMotion = true,
+        }
+    end
+
+    CachedBar.Cursor = bestCursor
+    CachedBar.Track = findTrackForCursor(bestCursor, searchRoot, screenW)
+
+    local cx = bestCursor.AbsolutePosition.X + bestCursor.AbsoluteSize.X * 0.5
+    local track = CachedBar.Track
+    local middleX = track and (track.AbsolutePosition.X + track.AbsoluteSize.X * 0.5) or (screenW * 0.5)
+    local yellowHalfW = track and (track.AbsoluteSize.X * 0.042) or (screenW * 0.018)
+
+    return {
+        ScreenGui = CachedBar.ScreenGui,
+        Track = track,
+        CurX = cx,
+        Vx = bestVx,
+        MiddleX = middleX,
+        YellowHalfWidth = yellowHalfW,
+    }
+end
+
+local function stepAutoMiddle()
+    if not State.Running or not Config.AutoPerfect then
+        return
+    end
+
+    local data = getActiveMinigameData()
+    if not data or data.WaitingForMotion then
+        return
+    end
+
+    local now = os.clock()
     if (now - State.LastPerfectTapAt) < 0.30 then
         return
     end
 
-    local prevX = curX - dx
-    local predictedX = curX + dx * 0.85
-    local tolerance = math.max(yellowHalfW * 0.65, 4)
+    local curX = data.CurX
+    local vx = data.Vx
+    local prevX = curX - vx
+    local predictedX = curX + vx * 0.85
+    local middleX = data.MiddleX
+    local tolerance = math.max(data.YellowHalfWidth * 0.65, 4)
 
     local prevDelta = prevX - middleX
     local predDelta = predictedX - middleX
 
     local insideYellow = math.abs(predDelta) <= tolerance
-    local crossedMiddle = (math.abs(dx) > 0.3)
+    local crossedMiddle = (math.abs(vx) > 0.3)
         and ((prevDelta <= 0 and predDelta >= 0) or (prevDelta >= 0 and predDelta <= 0))
 
     if insideYellow or crossedMiddle then
-        if fireInstantMiddleTap(screenGui, trackObj) then
+        if fireInstantMiddleTap(data.ScreenGui, data.Track) then
             State.LastPerfectTapAt = now
         end
     end
@@ -1954,22 +1546,11 @@ local function findTopPerfectAnchorY(searchRoot)
     return nil
 end
 
-local function stepAutoPerfectReel()
-    if not State.Running or not Config.AutoPerfectReel then
-        return
-    end
-
+local function getActiveReelBarData()
     local now = os.clock()
     local cam = Workspace.CurrentCamera
     local vs = cam and cam.ViewportSize or Vector2.new(1280, 720)
     local screenW, screenH = vs.X, vs.Y
-
-    local screenGui = nil
-    local trackObj = nil
-    local curY = nil
-    local dy = 0
-    local topY = screenH * 0.21
-    local barH = screenH * 0.52
 
     if CachedReelBar.Header and isVisibleTextElement(CachedReelBar.Header)
         and CachedReelBar.Cursor and isGuiChainVisible(CachedReelBar.Cursor)
@@ -1977,129 +1558,147 @@ local function stepAutoPerfectReel()
         local cursor = CachedReelBar.Cursor
         local cx = cursor.AbsolutePosition.X + cursor.AbsoluteSize.X * 0.5
         local cy = cursor.AbsolutePosition.Y + cursor.AbsoluteSize.Y * 0.5
-        local py = State.PrevReelY[cursor]
-        dy = py and (cy - py) or 0
-        State.PrevReelX[cursor] = cx
-        State.PrevReelY[cursor] = cy
+        local prev = State.PrevReelPos[cursor]
+        local vy = prev and (cy - prev.y) or 0
+        State.PrevReelPos[cursor] = { x = cx, y = cy }
 
         local track = (CachedReelBar.Track and isGuiChainVisible(CachedReelBar.Track)) and CachedReelBar.Track or nil
-        topY = track and track.AbsolutePosition.Y or CachedReelBar.FallbackTopY or (screenH * 0.21)
-        barH = track and track.AbsoluteSize.Y or (screenH * 0.52)
-        screenGui = CachedReelBar.ScreenGui
-        trackObj = track
-        curY = cy
-    else
-        if not CachedReelBar.Header or not isVisibleTextElement(CachedReelBar.Header) then
-            if (now - CachedReelBar.LastIdleScanAt) < 0.10 then
-                return
-            end
-            CachedReelBar.LastIdleScanAt = now
-            CachedReelBar.Header = nil
-            CachedReelBar.Cursor = nil
-            CachedReelBar.Track = nil
-            CachedReelBar.FallbackTopY = nil
-            table.clear(State.PrevReelX)
-            table.clear(State.PrevReelY)
+        local topY = track and track.AbsolutePosition.Y or CachedReelBar.FallbackTopY or (screenH * 0.21)
+        local barH = track and track.AbsoluteSize.Y or (screenH * 0.52)
 
-            for _, desc in ipairs(PlayerGui:GetDescendants()) do
-                if (desc:IsA("TextLabel") or desc:IsA("TextButton")) and isVisibleTextElement(desc) then
-                    local upper = stripRichText(desc.Text or ""):upper()
-                    if upper:find("TAP TO CAST", 1, true)
-                        or upper:find("TAP TO REEL", 1, true)
-                        or upper:find("ALWAYS PERFECT", 1, true)
-                    then
-                        CachedReelBar.Header = desc
-                        CachedReelBar.ScreenGui = desc:FindFirstAncestorWhichIsA("LayerCollector") or desc.Parent
-                        break
-                    end
+        return {
+            ScreenGui = CachedReelBar.ScreenGui,
+            Track = track,
+            CurY = cy,
+            Vy = vy,
+            TopY = topY,
+            BarHeight = barH,
+        }
+    end
+
+    if not CachedReelBar.Header or not isVisibleTextElement(CachedReelBar.Header) then
+        if (now - CachedReelBar.LastIdleScanAt) < 0.08 then
+            return nil
+        end
+        CachedReelBar.LastIdleScanAt = now
+        CachedReelBar.Header = nil
+        CachedReelBar.Cursor = nil
+        CachedReelBar.Track = nil
+        CachedReelBar.FallbackTopY = nil
+
+        for _, desc in ipairs(PlayerGui:GetDescendants()) do
+            if (desc:IsA("TextLabel") or desc:IsA("TextButton")) and isVisibleTextElement(desc) then
+                local upper = stripRichText(desc.Text or ""):upper()
+                if upper:find("TAP TO CAST", 1, true)
+                    or upper:find("TAP TO REEL", 1, true)
+                    or upper:find("ALWAYS PERFECT", 1, true)
+                then
+                    CachedReelBar.Header = desc
+                    CachedReelBar.ScreenGui = desc:FindFirstAncestorWhichIsA("LayerCollector") or desc.Parent
+                    break
                 end
-            end
-
-            if not CachedReelBar.Header then
-                return
             end
         end
 
-        local searchRoot = CachedReelBar.ScreenGui or PlayerGui
-        local bestCursor = nil
-        local bestSpeed = 0
-        local bestDy = 0
+        if not CachedReelBar.Header then
+            return nil
+        end
+    end
 
-        for _, obj in ipairs(searchRoot:GetDescendants()) do
-            if obj:IsA("GuiObject") and not obj:IsA("TextLabel") and isGuiChainVisible(obj) then
-                local sx, sy = obj.AbsoluteSize.X, obj.AbsoluteSize.Y
-                if sy >= 2 and sy <= screenH * 0.12 and sx >= 12 and sx <= screenW * 0.35 and sy <= sx * 1.3 then
-                    local cx = obj.AbsolutePosition.X + sx * 0.5
-                    local cy = obj.AbsolutePosition.Y + sy * 0.5
-                    local px = State.PrevReelX[obj]
-                    local py = State.PrevReelY[obj]
-                    State.PrevReelX[obj] = cx
-                    State.PrevReelY[obj] = cy
+    local searchRoot = CachedReelBar.ScreenGui or PlayerGui
+    local bestCursor = nil
+    local bestSpeed = 0
+    local bestVy = 0
 
-                    if px and py then
-                        local stepDx = cx - px
-                        local stepDy = cy - py
-                        if math.abs(stepDy) > 0.3 and math.abs(stepDx) < 1.5 then
-                            if math.abs(stepDy) > bestSpeed then
-                                bestSpeed = math.abs(stepDy)
-                                bestDy = stepDy
-                                bestCursor = obj
-                            end
+    for _, obj in ipairs(searchRoot:GetDescendants()) do
+        if obj:IsA("GuiObject") and not obj:IsA("TextLabel") and isGuiChainVisible(obj) then
+            local sx, sy = obj.AbsoluteSize.X, obj.AbsoluteSize.Y
+            if sy >= 2 and sy <= screenH * 0.12 and sx >= 12 and sx <= screenW * 0.35 and sy <= sx * 1.3 then
+                local cx = obj.AbsolutePosition.X + sx * 0.5
+                local cy = obj.AbsolutePosition.Y + sy * 0.5
+                local prev = State.PrevReelPos[obj]
+                State.PrevReelPos[obj] = { x = cx, y = cy }
+
+                if prev then
+                    local dx = cx - prev.x
+                    local dy = cy - prev.y
+                    if math.abs(dy) > 0.3 and math.abs(dx) < 1.5 then
+                        if math.abs(dy) > bestSpeed then
+                            bestSpeed = math.abs(dy)
+                            bestVy = dy
+                            bestCursor = obj
                         end
                     end
                 end
             end
         end
-
-        if not bestCursor then
-            return
-        end
-
-        CachedReelBar.Cursor = bestCursor
-        CachedReelBar.Track = findVerticalTrackForCursor(bestCursor, searchRoot, screenH)
-        CachedReelBar.FallbackTopY = findTopPerfectAnchorY(searchRoot)
-
-        curY = bestCursor.AbsolutePosition.Y + bestCursor.AbsoluteSize.Y * 0.5
-        dy = bestDy
-        local track = CachedReelBar.Track
-        topY = track and track.AbsolutePosition.Y or CachedReelBar.FallbackTopY or (screenH * 0.21)
-        barH = track and track.AbsoluteSize.Y or (screenH * 0.52)
-        screenGui = CachedReelBar.ScreenGui
-        trackObj = track
     end
 
+    if not bestCursor then
+        return {
+            ScreenGui = CachedReelBar.ScreenGui,
+            WaitingForMotion = true,
+        }
+    end
+
+    CachedReelBar.Cursor = bestCursor
+    CachedReelBar.Track = findVerticalTrackForCursor(bestCursor, searchRoot, screenH)
+    CachedReelBar.FallbackTopY = findTopPerfectAnchorY(searchRoot)
+
+    local cy = bestCursor.AbsolutePosition.Y + bestCursor.AbsoluteSize.Y * 0.5
+    local track = CachedReelBar.Track
+    local topY = track and track.AbsolutePosition.Y or CachedReelBar.FallbackTopY or (screenH * 0.21)
+    local barH = track and track.AbsoluteSize.Y or (screenH * 0.52)
+
+    return {
+        ScreenGui = CachedReelBar.ScreenGui,
+        Track = track,
+        CurY = cy,
+        Vy = bestVy,
+        TopY = topY,
+        BarHeight = barH,
+    }
+end
+
+local function stepAutoPerfectReel()
+    if not State.Running or not Config.AutoPerfectReel then
+        return
+    end
+
+    local data = getActiveReelBarData()
+    if not data or data.WaitingForMotion then
+        return
+    end
+
+    local now = os.clock()
     if (now - State.LastReelTapAt) < 0.35 then
         return
     end
 
-    local predictedY = curY + dy * 0.85
-    local perfectZoneBottom = topY + math.max(barH * 0.042, 6)
-    local perfectZoneTop = topY - math.max(barH * 0.06, 12)
+    local curY = data.CurY
+    local vy = data.Vy
+    local predictedY = curY + vy * 0.85
+    local topY = data.TopY
+    local perfectZoneBottom = topY + math.max(data.BarHeight * 0.042, 6)
+    local perfectZoneTop = topY - math.max(data.BarHeight * 0.06, 12)
 
-    if predictedY <= perfectZoneBottom and curY >= perfectZoneTop and dy <= 1.0 then
-        if fireInstantMiddleTap(screenGui, trackObj) then
+    if predictedY <= perfectZoneBottom and curY >= perfectZoneTop and vy <= 1.0 then
+        if fireInstantMiddleTap(data.ScreenGui, data.Track) then
             State.LastReelTapAt = now
         end
     end
 end
 
 --============================================================================
--- TIER LADDER DETECTOR + REEL IN / GO DEEPER (Cached Pool - Zero Lag!)
+-- TIER LADDER DETECTOR + REEL IN / GO DEEPER
 --============================================================================
-local CachedSeaKingLbl = nil
-
 local function detectTierFromLadder(searchRoot)
     local seaKingLabel = nil
-    if CachedSeaKingLbl and CachedSeaKingLbl.Parent and isVisibleTextElement(CachedSeaKingLbl) then
-        seaKingLabel = CachedSeaKingLbl
-    else
-        for desc in pairs(GuiTextPool) do
-            if desc.Parent and desc:IsA("TextLabel") and desc:IsDescendantOf(searchRoot) and isVisibleTextElement(desc) then
-                if stripRichText(desc.Text or ""):upper() == "SEA KING" then
-                    seaKingLabel = desc
-                    CachedSeaKingLbl = desc
-                    break
-                end
+    for _, desc in ipairs(searchRoot:GetDescendants()) do
+        if desc:IsA("TextLabel") and isVisibleTextElement(desc) then
+            if stripRichText(desc.Text or ""):upper() == "SEA KING" then
+                seaKingLabel = desc
+                break
             end
         end
     end
@@ -2172,37 +1771,17 @@ local function detectTierFromLadder(searchRoot)
     return nil
 end
 
-local CachedReelLbl = nil
-local CachedDeeperLbl = nil
-
 local function findDecisionContext()
     local reelLabel = nil
     local deeperLabel = nil
 
-    if CachedReelLbl and CachedReelLbl.Parent and isVisibleTextElement(CachedReelLbl) then
-        local up = stripRichText(CachedReelLbl.Text or ""):upper()
-        if up == "REEL IN" or up:find("^REEL IN") then
-            reelLabel = CachedReelLbl
-        end
-    end
-    if CachedDeeperLbl and CachedDeeperLbl.Parent and isVisibleTextElement(CachedDeeperLbl) then
-        local up = stripRichText(CachedDeeperLbl.Text or ""):upper()
-        if up == "GO DEEPER" or up:find("^GO DEEPER") then
-            deeperLabel = CachedDeeperLbl
-        end
-    end
-
-    if not reelLabel and not deeperLabel then
-        for desc in pairs(GuiTextPool) do
-            if desc.Parent and isVisibleTextElement(desc) then
-                local upper = stripRichText(desc.Text or ""):upper()
-                if upper == "REEL IN" or upper:find("^REEL IN") then
-                    reelLabel = desc
-                    CachedReelLbl = desc
-                elseif upper == "GO DEEPER" or upper:find("^GO DEEPER") then
-                    deeperLabel = desc
-                    CachedDeeperLbl = desc
-                end
+    for _, desc in ipairs(PlayerGui:GetDescendants()) do
+        if (desc:IsA("TextLabel") or desc:IsA("TextButton")) and isVisibleTextElement(desc) then
+            local upper = stripRichText(desc.Text or ""):upper()
+            if upper == "REEL IN" or upper:find("^REEL IN") then
+                reelLabel = desc
+            elseif upper == "GO DEEPER" or upper:find("^GO DEEPER") then
+                deeperLabel = desc
             end
         end
     end
@@ -2215,8 +1794,8 @@ local function findDecisionContext()
     local doubloonsText = ""
     local isFirstTierUncommonNext = false
 
-    for desc in pairs(GuiTextPool) do
-        if desc.Parent and desc:IsDescendantOf(searchRoot) and isVisibleTextElement(desc) then
+    for _, desc in ipairs(searchRoot:GetDescendants()) do
+        if (desc:IsA("TextLabel") or desc:IsA("TextButton")) and isVisibleTextElement(desc) then
             local clean = stripRichText(desc.Text or "")
             local upper = clean:upper()
             if upper:find("DOUBLOON", 1, true) then
@@ -2244,22 +1823,10 @@ end
 --============================================================================
 -- FISH AGAIN, AUTO 2X & AUTO UPGRADE
 --============================================================================
-local CachedFishAgainLbl = nil
-
 local function tryClickFishAgain()
-    if CachedFishAgainLbl and CachedFishAgainLbl.Parent and isVisibleTextElement(CachedFishAgainLbl) then
-        if stripRichText(CachedFishAgainLbl.Text or ""):upper() == "FISH AGAIN" then
-            if clickGuiElement(CachedFishAgainLbl) then
-                return true
-            end
-        end
-    end
-    for desc in pairs(GuiTextPool) do
-        if not desc.Parent then
-            GuiTextPool[desc] = nil
-        elseif isVisibleTextElement(desc) then
+    for _, desc in ipairs(PlayerGui:GetDescendants()) do
+        if (desc:IsA("TextLabel") or desc:IsA("TextButton")) and isVisibleTextElement(desc) then
             if stripRichText(desc.Text or ""):upper() == "FISH AGAIN" then
-                CachedFishAgainLbl = desc
                 if clickGuiElement(desc) then
                     return true
                 end
@@ -2273,11 +1840,9 @@ local function tryClick2x()
     if isPurchasePromptOpen() then
         return false
     end
-    for desc in pairs(GuiTextPool) do
-        if not desc.Parent then
-            GuiTextPool[desc] = nil
-        elseif isVisibleTextElement(desc) and desc.AbsolutePosition.Y > 90 then
-            if stripRichText(desc.Text or ""):lower() == "2x" and isSafeGameplayElement(desc) then
+    for _, desc in ipairs(PlayerGui:GetDescendants()) do
+        if (desc:IsA("TextLabel") or desc:IsA("TextButton")) and isVisibleTextElement(desc) then
+            if stripRichText(desc.Text or ""):lower() == "2x" and desc.AbsolutePosition.Y > 90 and isSafeGameplayElement(desc) then
                 if clickGuiElement(desc) then
                     return true
                 end
@@ -2307,7 +1872,7 @@ local Window = Rayfield:CreateWindow({
     Name = "perdi",
     Icon = 0,
     LoadingTitle = "perdi",
-    LoadingSubtitle = "Cloudphone Optimized Auto Hub",
+    LoadingSubtitle = "Auto Fish, Train & Playtime Hop",
     Theme = "Default",
     DisableRayfieldPrompts = false,
     DisableBuildWarnings = true,
@@ -2435,62 +2000,7 @@ MainTab:CreateButton({
     end,
 })
 
--- TAB 2: CLOUDPHONE OPTIMIZER
-local OptTab = Window:CreateTab("Cloudphone", 4483362458)
-
-OptTab:CreateSection("Anti-Crash & Low Graphics (Auto-Saved)")
-
-OptTab:CreateToggle({
-    Name = "Cloudphone Potato Graphics (Strip Lag)",
-    CurrentValue = Config.PotatoMode,
-    Callback = function(Value)
-        Config.PotatoMode = Value
-        savePersistentConfig()
-        if Value then
-            applyPotatoGraphics(true)
-        end
-    end,
-})
-
-OptTab:CreateToggle({
-    Name = "Hide Other Players & Plot Beasts",
-    CurrentValue = Config.HideOthers,
-    Callback = function(Value)
-        Config.HideOthers = Value
-        savePersistentConfig()
-        if Value then
-            sweepHideOthersAndPlotBeasts()
-        else
-            for _, plr in ipairs(Players:GetPlayers()) do
-                if plr ~= LocalPlayer and plr.Character then
-                    restoreCharacterVisuals(plr.Character)
-                end
-            end
-        end
-    end,
-})
-
-AfkToggleCallbackRef = OptTab:CreateToggle({
-    Name = "AFK No-3D Screen (Max GPU/RAM Saver)",
-    CurrentValue = Config.Disable3DRender,
-    Callback = function(Value)
-        Config.Disable3DRender = Value
-        savePersistentConfig()
-        applyNo3DRenderState(Value)
-    end,
-})
-
-OptTab:CreateToggle({
-    Name = "Cloudphone 25 FPS Cap",
-    CurrentValue = Config.CapFps25,
-    Callback = function(Value)
-        Config.CapFps25 = Value
-        savePersistentConfig()
-        applyFpsCapState(Value)
-    end,
-})
-
--- TAB 3: PLAYTIME & SERVER HOP
+-- TAB 2: PLAYTIME & SERVER HOP
 local HopTab = Window:CreateTab("Playtime & Hop", 4483362458)
 
 local PlaytimeStatusPara = HopTab:CreateParagraph({
@@ -2528,7 +2038,7 @@ HopTab:CreateSection("Auto-Save & Auto-Load on Hop")
 HopTab:CreateInput({
     Name = "Script Raw URL (Auto-Loads on Hop)",
     CurrentValue = Config.ScriptURL or "",
-    PlaceholderText = "https://pastebin.com/raw/AAbZU6nm",
+    PlaceholderText = "https://raw.githubusercontent.com/triskxd-ops/Perdi/main/perdi_hub.lua",
     RemoveTextAfterFocusLost = false,
     Callback = function(Text)
         if type(Text) == "string" and #Text > 8 then
@@ -2578,27 +2088,20 @@ local function runMainLoop()
             sendAntiAFKPulse()
         end
 
-        -- 2) Periodic sweep for newly spawned avatars / plot beasts when HideOthers is ON
-        if Config.HideOthers and (now - State.LastHideSweepAt) >= 8.0 then
-            State.LastHideSweepAt = now
-            findOwnedPlotAnchorPos()
-            sweepHideOthersAndPlotBeasts()
-        end
-
         local barActive = (CachedBar.Header and isVisibleTextElement(CachedBar.Header))
             or (CachedReelBar.Header and isVisibleTextElement(CachedReelBar.Header))
 
-        -- 3) Auto Claim Playtime & Server Hop (runs when not mid-fishing bar)
+        -- 2) Auto Claim Playtime & Server Hop (runs when not mid-fishing bar)
         if Config.AutoPlaytime and not barActive then
             stepAutoPlaytimeAndHop()
         end
 
-        -- 4) Auto Train (walks onto plot training area if not currently fishing or already training)
+        -- 3) Auto Train (walks onto plot training area if not currently fishing or already training)
         if Config.AutoTrain and not Config.AutoFish and not barActive and not State.HoppingInProgress then
             stepAutoTrain()
         end
 
-        -- 5) Auto Fish (Cast + Stop at Tier - Zero-Allocation Cached Engine)
+        -- 4) Auto Fish (Cast + Stop at Tier)
         if Config.AutoFish and not State.HoppingInProgress then
             local middleBarActive = CachedBar.Header and isVisibleTextElement(CachedBar.Header)
             local decisionCtx = (not middleBarActive) and findDecisionContext() or nil
@@ -2647,25 +2150,20 @@ local function runMainLoop()
                     State.LastDecisionSignature = ""
                 end
 
-                if (now - State.LastCastAt) >= 1.1 and not isPurchasePromptOpen() then
+                if (now - State.LastCastAt) >= 1.3 and not isPurchasePromptOpen() then
                     local startedCast = false
-
-                    -- 1) Click green "FISH AGAIN" button if visible at bottom of screen
                     if tryClickFishAgain() then
                         startedCast = true
                     else
-                        -- 2) Otherwise trigger the Abyss Hole / Fish ProximityPrompt
                         local fishPrompt = findNearestPromptMatching(function(actionText, objectText)
                             return actionText == "fish"
                                 or actionText:find("fish", 1, true) ~= nil
                                 or objectText:find("abyss hole", 1, true) ~= nil
-                                or objectText:find("hole", 1, true) ~= nil
                         end)
                         if fishPrompt and triggerPrompt(fishPrompt) then
                             startedCast = true
                         end
                     end
-
                     if startedCast then
                         State.CurrentTier = 1
                         State.LastDecisionSignature = ""
@@ -2675,14 +2173,14 @@ local function runMainLoop()
             end
         end
 
-        -- 6) Auto 2x
-        if Config.Auto2x and (now - State.Last2xAt) >= 0.7 then
+        -- 5) Auto 2x
+        if Config.Auto2x and (now - State.Last2xAt) >= 0.6 then
             if tryClick2x() then
                 State.Last2xAt = now
             end
         end
 
-        -- 7) Auto Upgrade
+        -- 6) Auto Upgrade
         if Config.AutoUpgrade and (now - State.LastUpgradeAt) >= 2.5 then
             State.LastUpgradeAt = now
             tryUpgradePrompt()
@@ -2699,7 +2197,7 @@ local function runMainLoop()
             end)
         end
 
-        task.wait(0.18)
+        task.wait(0.15)
     end
 end
 
@@ -2709,15 +2207,6 @@ end
 local function cleanup()
     State.Running = false
     applyAntiAFKState(false)
-    pcall(function()
-        RunService:Set3dRenderingEnabled(true)
-    end)
-    if AfkOverlayGui then
-        pcall(function()
-            AfkOverlayGui:Destroy()
-        end)
-        AfkOverlayGui = nil
-    end
     for _, conn in ipairs(Connections) do
         pcall(function()
             conn:Disconnect()
@@ -2732,35 +2221,17 @@ end
 
 globalEnv.__PERDI_HUB_CLEANUP = cleanup
 
-initializeCachesAsync()
 applyAntiAFKState(Config.AntiAFK)
 recordCurrentServerVisited()
 armQueueOnTeleport()
 
--- Apply saved Cloudphone optimizations automatically on startup / server hop!
-if Config.PotatoMode then
-    applyPotatoGraphics(true)
-end
-if Config.CapFps25 then
-    applyFpsCapState(true)
-end
-if Config.Disable3DRender then
-    applyNo3DRenderState(true)
-end
-if Config.HideOthers then
-    task.delay(2.0, function()
-        if State.Running and Config.HideOthers then
-            findOwnedPlotAnchorPos()
-            sweepHideOthersAndPlotBeasts()
-        end
-    end)
-end
-
+-- Ensure queue_on_teleport also arms on any manual or server-initiated teleport
 table.insert(Connections, LocalPlayer.OnTeleport:Connect(function()
     savePersistentConfig()
     armQueueOnTeleport()
 end))
 
+-- Retry another server automatically if chosen server filled up mid-teleport
 table.insert(Connections, TeleportService.TeleportInitFailed:Connect(function()
     if State.HoppingInProgress then
         State.HoppingInProgress = false
@@ -2795,6 +2266,6 @@ task.spawn(runMainLoop)
 
 Rayfield:Notify({
     Title = "perdi",
-    Content = "Cloudphone Engine Ready! Saved config loaded.",
+    Content = "Loaded saved config! Auto Train & Playtime Hop ready.",
     Duration = 4,
 })
